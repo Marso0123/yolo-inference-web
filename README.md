@@ -2,6 +2,52 @@
 
 用于查看自己训练的 YOLOv8、YOLO11、YOLO26 目标检测／实例分割模型效果。支持 PT、ONNX，图片、视频、RTSP，CPU／NVIDIA GPU，批量图片导出 YOLO 预标注数据集，以及网页 PT 转 ONNX。
 
+## 主要功能
+
+| 功能 | 说明 |
+|---|---|
+| 模型与设备 | 加载 Ultralytics 标准 PT／ONNX 检测、实例分割模型，选择 CPU 或 NVIDIA GPU |
+| 实时预览 | 图片单次推理，视频按原时间线播放，RTSP 处理最新帧并自动重连 |
+| 类别过滤 | 勾选需要输出的类别，支持搜索和按模型保存；不配置时输出全部类别 |
+| 结果保存 | 手动保存带标注图片，或录制带标注 H.264 视频 |
+| 批量预标注 | 选择文件夹或多张图片，导出原图与 YOLO 标签；未检出生成空标签并列为待复核 |
+| 模型转换 | PT 转 ONNX，保留任务／类别元数据，转换后执行实际推理检查 |
+
+## 实际运行截图
+
+以下是本项目当前版本的实际运行页面。演示使用官方 YOLO11n／YOLO26n 模型、[Ultralytics bus.jpg](https://ultralytics.com/images/bus.jpg) 和生成的空白图片。点击图片可查看原图。
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>目标检测</b><br>
+      YOLO11n PT 在 GPU 上推理，显示目标框、类别、置信度与统计。
+      <a href="docs/screenshots/detection.jpg"><img src="docs/screenshots/detection.jpg" width="640" alt="YOLO11n GPU 目标检测实际运行页面"></a>
+    </td>
+    <td width="50%" valign="top">
+      <b>实例分割</b><br>
+      YOLO26n-seg ONNX 在 GPU 上推理，叠加目标掩膜，界面显示 CUDA 已验证。
+      <a href="docs/screenshots/segmentation.jpg"><img src="docs/screenshots/segmentation.jpg" width="640" alt="YOLO26n-seg ONNX 实例分割实际运行页面"></a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <b>类别过滤</b><br>
+      从模型的 80 个类别中只勾选 bus，画面和统计仅输出这一类别。
+      <a href="docs/screenshots/class-filter.jpg"><img src="docs/screenshots/class-filter.jpg" width="640" alt="仅输出 bus 类别的实际过滤结果"></a>
+    </td>
+    <td width="50%" valign="top">
+      <b>批量图片与 YOLO 数据集</b><br>
+      文件夹内 3 张图片全部处理完成，其中 1 张未检出生成空标签并列为待复核。截图取景避开完整本机输出路径。
+      <a href="docs/screenshots/batch.jpg"><img src="docs/screenshots/batch.jpg" width="640" alt="批量处理 3 张图片并导出 YOLO 数据集的实际页面"></a>
+    </td>
+  </tr>
+</table>
+
+**PT 转 ONNX：** YOLO11n 权重转换完成，并通过 CPU 实际推理检查，提供下载和加载入口。
+
+![PT 转 ONNX 转换完成页面](docs/screenshots/onnx-export.jpg)
+
 ## 安装与启动
 
 当前启动和安装脚本适用于 **Windows x64**，使用 Python 3.11。GPU 推理需要可用的 NVIDIA 驱动；没有可用 GPU 时可选择 CPU。Linux／macOS 尚未验证。
