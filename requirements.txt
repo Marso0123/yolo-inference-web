@@ -1,0 +1,10 @@
+ultralytics==8.4.175
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+python-multipart==0.0.20
+onnx==1.17.0
+onnxruntime-gpu==1.22.0
+numpy==1.26.4
+opencv-python==4.11.0.86
+httpx==0.28.1
+pytest==8.4.2

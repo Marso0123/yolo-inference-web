@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>YOLO Studio · 模型效果查看器</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="brand-icon">Y</span>
+        <div><b>YOLO Studio</b><small>模型效果查看器</small></div>
+      </div>
+      <nav aria-label="功能导航">
+        <button class="nav active" data-view="inference">实时推理</button
+        ><button id="navBatch" class="nav" data-view="batch">批量图片</button
+        ><button class="nav" data-view="conversion">模型转换</button
+        ><button class="nav" data-view="saved">保存记录</button>
+      </nav>
+      <span id="hardware" class="hardware">正在读取设备…</span>
+    </header>
+    <main>
+      <section id="inference" class="view active">
+        <div class="page-title">
+          <div>
+            <span class="eyebrow">MODEL PLAYGROUND</span>
+            <h1 id="inferenceTitle">让训练结果，看得见。</h1>
+            <p id="inferenceIntro">
+              加载自己的 YOLO 模型，查看检测与实例分割效果。
+            </p>
+          </div>
+          <span class="local-badge"><i></i> 本机运行</span>
+        </div>
+        <div class="workspace">
+          <aside>
+            <section class="card">
+              <div class="card-title">
+                <span class="step">01</span>
+                <h2>模型与设备</h2>
+                <span id="taskBadge" class="tag">待加载</span>
+              </div>
+              <label class="field-label" for="modelSelect">当前模型</label
+              ><select id="modelSelect">
+                <option value="">选择已上传的模型</option>
+              </select>
+              <label class="upload small-upload" for="modelFile"
+                ><span>＋ 选择 PT / ONNX 文件</span
+                ><small>支持自训练检测、实例分割模型</small></label
+              ><input id="modelFile" type="file" accept=".pt,.onnx" hidden />
+              <div class="row">
+                <label
+                  >推理设备<select id="device">
+                    <option value="gpu">GPU · CUDA</option>
+                    <option value="cpu">CPU</option>
+                  </select></label
+                ><label
+                  >输入尺寸<input
+                    id="imgsz"
+                    type="number"
+                    min="32"
+                    max="2048"
+                    step="32"
+                    value="640"
+                /></label>
+              </div>
+              <button id="loadModel" class="button secondary full">
+                加载模型
+              </button>
+              <p id="modelInfo" class="hint">
+                加载后自动读取模型类别与任务类型。
+              </p>
+            </section>
+            <section class="card">
+              <div class="card-title">
+                <span class="step">02</span>
+                <h2>输入来源</h2>
+              </div>
+              <div class="segments" aria-label="输入类型">
+                <button class="source active" data-kind="image">图片</button
+                ><button class="source" data-kind="video">视频</button
+                ><button class="source" data-kind="rtsp">RTSP 流</button
+                ><button class="source" data-kind="batch">批量图片</button>
+              </div>
+              <div id="fileSource">
+                <label class="upload" for="mediaFile"
+                  ><span class="upload-symbol">↥</span
+                  ><b id="uploadTitle">选择待推理图片</b
+                  ><small id="mediaName">JPG / PNG / BMP / WebP</small></label
+                ><input
+                  id="mediaFile"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.bmp,.webp"
+                  hidden
+                /><select id="mediaSelect" aria-label="已上传素材">
+                  <option value="">或选择已上传的图片</option>
+                </select>
+              </div>
+              <div id="rtspSource" hidden>
+                <label class="field-label" for="rtspUrl">RTSP 地址</label
+                ><input
+                  id="rtspUrl"
+                  type="password"
+                  placeholder="rtsp://用户名:密码@地址:端口/路径"
+                  autocomplete="off"
+                /><label class="check"
+                  ><input id="showUrl" type="checkbox" /> 显示地址</label
+                >
+                <p class="hint">处理最新帧；连接中断时自动重连。</p>
+              </div>
+              <div id="batchSource" hidden>
+                <div class="batch-pickers">
+                  <label class="upload small-upload" for="batchFolder"
+                    ><span>＋ 选择图片文件夹</span
+                    ><small>包含子目录中的图片</small></label
+                  >
+                  <label class="upload small-upload" for="batchFiles"
+                    ><span>＋ 选择多张图片</span></label
+                  >
+                </div>
+                <input
+                  id="batchFolder"
+                  type="file"
+                  webkitdirectory
+                  multiple
+                  hidden
+                />
+                <input
+                  id="batchFiles"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.bmp,.webp"
+                  multiple
+                  hidden
+                />
+                <p id="batchSelection" class="hint" role="status">
+                  尚未选择图片。支持 JPG / PNG / BMP / WebP。
+                </p>
+                <label class="check"
+                  ><input
+                    id="batchRemap"
+                    type="checkbox"
+                  />导出类别重新连续编号</label
+                >
+                <p class="hint compact">
+                  默认保留原编号；连续编号同步生成对应类别表。
+                </p>
+                <label class="check"
+                  ><input
+                    id="batchPreview"
+                    type="checkbox"
+                  />另存带标注的预览图片</label
+                >
+                <p class="hint">
+                  images
+                  保存原图；分割模型导出多边形。未检出生成空标签并列为待复核。
+                </p>
+              </div>
+            </section>
+            <section class="card">
+              <div class="card-title">
+                <span class="step">03</span>
+                <h2>推理与显示</h2>
+              </div>
+              <label class="slider-label" for="conf"
+                >置信度阈值 <output id="confValue">0.25</output></label
+              ><input
+                id="conf"
+                type="range"
+                min="0.01"
+                max="1"
+                step="0.01"
+                value="0.25"
+              />
+              <label class="slider-label" for="iou"
+                >NMS IoU 阈值 <output id="iouValue">0.45</output></label
+              ><input
+                id="iou"
+                type="range"
+                min="0.01"
+                max="1"
+                step="0.01"
+                value="0.45"
+              />
+              <p id="nmsHint" class="hint compact">适用于使用 NMS 的模型。</p>
+              <fieldset id="classFilter" class="class-filter" disabled>
+                <legend>类别过滤</legend>
+                <div class="class-filter-toolbar">
+                  <span id="classSummary" role="status"
+                    >加载模型后选择类别</span
+                  >
+                  <button id="resetClasses" class="class-reset" type="button">
+                    恢复全部
+                  </button>
+                </div>
+                <label class="sr-only" for="classSearch">搜索类别</label>
+                <input
+                  id="classSearch"
+                  type="search"
+                  placeholder="搜索类别名称或编号"
+                  autocomplete="off"
+                />
+                <div
+                  id="classList"
+                  class="class-list"
+                  role="group"
+                  aria-label="模型类别复选框"
+                ></div>
+                <p id="classEmpty" class="hint compact" hidden>
+                  没有匹配的类别，已有选择仍然保留。
+                </p>
+                <div class="class-save-row">
+                  <span id="classSaveState" class="hint"
+                    >未勾选时默认输出全部类别。</span
+                  ><button
+                    id="retryClasses"
+                    class="class-reset"
+                    type="button"
+                    hidden
+                  >
+                    重试保存
+                  </button>
+                </div>
+              </fieldset>
+              <div class="checks">
+                <label class="check"
+                  ><input id="boxes" type="checkbox" checked />目标框</label
+                ><label class="check"
+                  ><input id="masks" type="checkbox" checked />掩膜</label
+                ><label class="check"
+                  ><input id="labels" type="checkbox" checked />标签</label
+                >
+              </div>
+              <p class="hint compact">参数在下一次开始推理时生效。</p>
+            </section>
+          </aside>
+          <div class="results">
+            <section class="preview-card">
+              <div class="preview-toolbar">
+                <div>
+                  <span id="stateDot" class="state-dot"></span
+                  ><b id="stateLabel">等待开始</b>
+                </div>
+                <div class="preview-controls">
+                  <span id="sourceLabel">实时预览</span
+                  ><button id="start" class="button primary">▶ 开始推理</button
+                  ><button id="stop" class="button secondary">■ 停止</button>
+                </div>
+              </div>
+              <div id="preview" class="preview">
+                <canvas id="canvas" hidden></canvas>
+                <div id="placeholder" class="placeholder">
+                  <div class="target-icon"><span></span></div>
+                  <h2>从一个模型开始</h2>
+                  <p>选择模型和输入来源，推理结果将在这里显示。</p>
+                  <div class="capabilities">
+                    <span>目标检测</span><span>实例分割</span>
+                  </div>
+                </div>
+              </div>
+              <div class="preview-bottom">
+                <span id="statusMessage">请选择模型</span
+                ><span id="position"></span>
+              </div>
+            </section>
+            <div class="metrics">
+              <div class="metric">
+                <span>实际推理设备</span><strong id="actualDevice">—</strong>
+              </div>
+              <div class="metric">
+                <span>预览帧率</span
+                ><strong><em id="fps">—</em><small> FPS</small></strong>
+              </div>
+              <div class="metric">
+                <span>推理耗时</span
+                ><strong><em id="latency">—</em><small> ms</small></strong>
+              </div>
+              <div class="metric">
+                <span>当前目标</span
+                ><strong><em id="count">—</em><small> 个</small></strong>
+              </div>
+            </div>
+            <section class="card result-footer">
+              <div>
+                <h2>保存你需要的结果</h2>
+                <p class="hint">按需保存当前标注画面，或手动录制一段视频。</p>
+                <div id="counts" class="count-chips"></div>
+              </div>
+              <div class="save-actions">
+                <button id="snapshot" class="button secondary">
+                  保存当前图片</button
+                ><button id="record" class="button secondary">
+                  ● 开始录制
+                </button>
+              </div>
+            </section>
+            <div id="latestDownload" class="download-note" hidden></div>
+            <p class="footnote">
+              视频按原始时间线播放，处理较慢时跳帧。录制保持实际时长，不包含音频。
+            </p>
+            <section id="batchResult" class="card" hidden>
+              <div class="card-title">
+                <h2>数据集导出</h2>
+                <span id="batchTask" class="tag">等待开始</span>
+              </div>
+              <p id="batchProgressText" class="hint" role="status">
+                选择图片并加载模型后，点击开始批量推理。
+              </p>
+              <progress
+                id="batchProgress"
+                value="0"
+                max="1"
+                aria-label="批量任务进度"
+              ></progress>
+              <p id="batchCurrent" class="hint compact"></p>
+              <p id="batchOutput" class="dataset-path"></p>
+              <div class="batch-buttons">
+                <button id="batchCancel" class="button secondary" disabled>
+                  取消任务
+                </button>
+                <button id="batchZip" class="button secondary" disabled>
+                  生成 ZIP 下载
+                </button>
+                <span id="batchDownload"></span>
+              </div>
+              <p class="hint">
+                ZIP
+                按需生成，会额外占用磁盘空间。自动预标注请人工复核；report.csv
+                记录处理情况，review.csv
+                列出待复核图片。此处暂不划分训练／验证集。
+              </p>
+              <h2 class="batch-history-title">最近的数据集任务</h2>
+              <div id="batchHistory" class="batch-history"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+      <section id="conversion" class="view">
+        <div class="page-title">
+          <div>
+            <span class="eyebrow">MODEL EXPORT</span>
+            <h1>从 PT 到 ONNX。</h1>
+            <p>将训练权重转换成 ONNX，并检查生成模型能否完成推理。</p>
+          </div>
+        </div>
+        <div class="conversion-layout">
+          <section class="card">
+            <div class="card-title">
+              <span class="step">01</span>
+              <h2>选择 PT 模型</h2>
+            </div>
+            <select id="exportModel" aria-label="待转换 PT 模型">
+              <option value="">选择已上传的 PT 模型</option></select
+            ><label class="upload small-upload" for="exportFile"
+              ><span>＋ 选择 PT 文件</span></label
+            ><input id="exportFile" type="file" accept=".pt" hidden /><label
+              class="field-label"
+              for="exportSize"
+              >导出输入尺寸</label
+            ><input
+              id="exportSize"
+              type="number"
+              value="640"
+              min="32"
+              max="2048"
+              step="32"
+            />
+            <p class="hint">填写 32 的倍数，例如 640、960、1280。</p>
+            <button id="exportButton" class="button primary full">
+              转换为 ONNX
+            </button>
+          </section>
+          <section class="card export-explanation">
+            <h2>兼容的默认设置</h2>
+            <div class="export-grid">
+              <div><small>数值精度</small><b>FP32</b></div>
+              <div><small>输入形状</small><b>固定尺寸</b></div>
+              <div><small>批次大小</small><b>Batch 1</b></div>
+              <div><small>输出处理</small><b>不内置 NMS</b></div>
+            </div>
+            <p>
+              保留任务类型和类别名称。转换完成后执行 CPU
+              实际推理检查，再提供下载与加载入口。
+            </p>
+            <p class="hint">
+              转换前请先停止推理。转换后重新加载需要查看的模型。
+            </p>
+            <div id="exportState" class="export-state">等待选择模型</div>
+            <div id="exportResult" hidden></div>
+          </section>
+        </div>
+      </section>
+      <section id="saved" class="view">
+        <div class="page-title">
+          <div>
+            <span class="eyebrow">YOUR RESULTS</span>
+            <h1>保存记录。</h1>
+            <p>手动保存的标注图片和视频，随时下载。</p>
+          </div>
+          <button id="refreshSaved" class="button secondary">刷新列表</button>
+        </div>
+        <div id="savedList" class="saved-list"></div>
+      </section>
+    </main>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
