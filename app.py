@@ -75,6 +75,7 @@ class Start(Load):
     kind: Literal['image', 'video', 'rtsp']
     media_id: str | None = None
     url: str = ''
+    save_full_video: bool = False
 
 
 class Export(BaseModel):

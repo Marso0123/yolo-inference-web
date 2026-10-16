@@ -88,6 +88,8 @@ class Engine:
         self.stop_event = threading.Event()
         self.recorder = None
         self.record_saving = False
+        self.record_finish_lock = threading.RLock()
+        self.record_result = None
         self.seq = 0
         self.generation = 0
         self.jpeg = None
@@ -96,7 +98,8 @@ class Engine:
         self.state = dict(status='idle', message='请选择模型', source_kind=None, model=None, recording=False,
                           saving=False, fps=0, inference_ms=0, count=0, counts={}, position=None,
                           last_saved=None, export=None, record_error=None, batch=None,
-                          source_fps=None, recording_fps=None, recording_mode=None)
+                          source_fps=None, recording_fps=None, recording_mode=None,
+                          record_armed=False, recording_result=None)
 
     def update(self, **kwargs):
         with self.lock:
@@ -181,6 +184,9 @@ class Engine:
                 raise ValueError('类别编号不属于当前模型。')
             self.runner.options.update(options)
             kind = request['kind']
+            save_full = request.get('save_full_video', False)
+            if save_full and kind != 'video':
+                raise ValueError('全程录制仅支持本地视频。')
             if kind == 'rtsp':
                 source = request['url'].strip()
                 if not source.lower().startswith(('rtsp://', 'rtsps://')):
@@ -193,7 +199,9 @@ class Engine:
             self.generation += 1
             self.clear_frame()
             self.stop_event = threading.Event()
-            self.update(status='running', source_kind=kind, message='正在推理', export=None)
+            self.record_result = None
+            self.update(status='running', source_kind=kind, message='正在推理', export=None,
+                        record_armed=save_full, recording_result=None, record_error=None)
             self.thread = threading.Thread(target=self.run, args=(kind, source), daemon=True, name='inference')
             self.thread.start()
             return self.status()
@@ -283,7 +291,11 @@ class Engine:
             if frame_index is not None and recorder is not recording:
                 recorder = None
             message = '正在逐帧推理并录制，保存时保持源视频帧率' if self.recorder and not self.recorder.realtime else '正在推理'
-            self.state.update(stats, position=position, status='running', message=message)
+            self.state.update(stats, position=position)
+            if self.state['status'] not in ('finalizing', 'stopping'):
+                self.state.update(status='running')
+                if not self.record_saving and not self.state['record_error']:
+                    self.state['message'] = message
         # MJPEG compression / queue backpressure must not hold the preview/status lock.
         if recorder:
             try:
@@ -299,6 +311,7 @@ class Engine:
         started = time.monotonic()
         last_published = None
         active_recording = None
+        completed = False
         try:
             if kind == 'image':
                 frame = cv2.imdecode(np.fromfile(source, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -351,7 +364,8 @@ class Engine:
                     elapsed = time.monotonic() - started
                     target = int(elapsed * fps)
                     # Ordinary preview can skip stale frames; source recording cannot.
-                    while not recording and next_index < target and not self.stop_event.is_set():
+                    while (not recording and not self.state['record_armed'] and next_index < target
+                           and not self.stop_event.is_set()):
                         if not capture.grab():
                             break
                         next_index += 1
@@ -359,7 +373,7 @@ class Engine:
                         break
                     ok, frame = capture.read()
                     if not ok:
-                        self.update(status='finished', message='视频播放完成')
+                        completed = True
                         break
                     position = dict(seconds=round(next_index / fps, 2), duration=duration)
                     frame_index = next_index
@@ -369,6 +383,12 @@ class Engine:
                     break
                 if capture:
                     with self.lock:
+                        if self.state['record_armed']:
+                            self._begin_recording(result, fps, False, frame_index)
+                            recording = self.recorder
+                            # Already seeded with this first result; next iteration starts at frame 1.
+                            active_recording = recording
+                            started = time.monotonic() - next_index / fps
                         if self.recorder is not None and self.recorder is not recording:
                             continue
                 now = time.monotonic()
@@ -394,9 +414,20 @@ class Engine:
                 capture.release()
             if live:
                 live.close()
+            with self.lock:
+                had_recording = bool(self.recorder or self.record_saving)
+                self.state['record_armed'] = False
+                if had_recording and self.state['status'] != 'error':
+                    self.state.update(status='finalizing', message='推理已结束，正在保存录制视频…')
             self.finish_recording()
-            if self.stop_event.is_set() and self.state['status'] != 'error':
-                self.update(status='stopped', message='推理已停止')
+            with self.lock:
+                if self.state['status'] != 'error' and (completed or self.stop_event.is_set()):
+                    self.state['status'] = 'finished' if completed else 'stopped'
+                    ending = '视频推理完成' if completed else '推理已停止'
+                    if self.state['record_error']:
+                        self.state['message'] = ending + '；录制保存失败：' + self.state['record_error']
+                    else:
+                        self.state['message'] = ending + ('，录制视频已保存' if self.record_result else '')
 
     def stop(self):
         with self.control:
@@ -407,7 +438,7 @@ class Engine:
                     self.update(status='stopping', message='正在等待当前操作退出…')
                     raise ValueError('当前操作尚未退出，请稍后再次点击停止。')
             self.finish_recording()
-            if self.runner and self.state['status'] not in ('error', 'finished'):
+            if self.runner and self.state['status'] not in ('error', 'finished', 'stopped'):
                 self.update(status='stopped', message='推理已停止')
             return self.status()
 
@@ -431,35 +462,61 @@ class Engine:
                 raise ValueError('请在视频或 RTSP 正在推理时开始录制。')
             if self.frame is None:
                 raise ValueError('请等待第一帧推理结果。')
-            if self.recorder or self.record_saving:
+            if self.recorder or self.record_saving or self.state['record_armed']:
                 raise ValueError('已有录制或保存任务。')
             realtime = self.state['source_kind'] == 'rtsp'
             if not realtime and self.frame_index is None:
                 raise ValueError('请等待视频帧就绪。')
             fps = self.state['source_fps'] or 25
-            self.recorder = Recorder(self.frame, fps=fps, realtime=realtime, source_index=self.frame_index)
-            self.state.update(recording=True, record_error=None, recording_fps=fps,
-                              recording_mode='realtime' if realtime else 'source_frames',
-                              message='正在录制实时推理画面' if realtime else '正在逐帧录制，保存时保持源视频帧率')
+            self._begin_recording(self.frame, fps, realtime, self.frame_index)
             return self.status()
 
+    def _begin_recording(self, frame, fps, realtime, source_index):
+        """Caller holds state lock; also used to seed full-video recording at frame zero."""
+        self.recorder = Recorder(frame, fps=fps, realtime=realtime, source_index=source_index)
+        self.record_result = None
+        self.state.update(recording=True, record_armed=False, record_error=None,
+                          recording_result=None, recording_fps=fps,
+                          recording_mode='realtime' if realtime else 'source_frames',
+                          message='正在录制实时推理画面' if realtime else '正在逐帧录制，保存时保持源视频帧率')
+
     def finish_recording(self, strict=False, expected=None):
+        # Concurrent manual stop / EOF callers wait for the same encoding result.
+        # No Engine state lock is held during encoding or while waiting here.
+        with self.record_finish_lock:
+            return self._finish_recording(strict, expected)
+
+    def _finish_recording(self, strict=False, expected=None):
         with self.lock:
             recorder = self.recorder
             if expected is not None and recorder is not expected:
                 return None
             if recorder is None:
-                return None
+                if strict and self.state['record_error']:
+                    raise ValueError(self.state['record_error'])
+                return self.record_result if strict else None
             self.recorder = None
             self.record_saving = True
             self.state.update(recording=False, saving=True, recording_fps=None, recording_mode=None)
+            if self.state['status'] != 'error':
+                self.state['message'] = ('推理已结束，正在保存录制视频…' if self.state['status'] == 'finalizing'
+                                         else '正在编码保存录制视频…')
         try:
             item = recorder.finish()
-            self.update(last_saved=item)
+            with self.lock:
+                self.record_result = item
+                message = '录制视频已保存：' + item.get('name', '标注视频')
+                if self.state['status'] == 'error':
+                    message = self.state['message'] + '；' + message
+                self.state.update(last_saved=item, recording_result=item, message=message)
             return item
         except Exception as error:
             LOGGER.exception('Recording failed')
-            self.update(message='录制保存失败：' + str(error), record_error=str(error))
+            with self.lock:
+                message = '录制保存失败：' + str(error)
+                if self.state['status'] == 'error':
+                    message = self.state['message'] + '；' + message
+                self.state.update(message=message, record_error=str(error))
             if strict:
                 raise ValueError(str(error)) from error
             return None

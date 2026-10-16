@@ -8,6 +8,8 @@ let kind = "image",
   receivedGeneration = -1,
   receivedSeq = -1,
   socket;
+let statusInitialized = false;
+const handledRecordings = new Set();
 let classModel = null,
   selectedClasses = new Set(),
   classSaveQueue = Promise.resolve(),
@@ -28,6 +30,7 @@ const statusNames = {
   finished: "推理完成",
   stopped: "已停止",
   stopping: "停止中",
+  finalizing: "正在保存视频",
   reconnecting: "正在重连",
   exporting: "正在转换",
   packaging: "正在打包",
@@ -263,7 +266,7 @@ function controls() {
   const locked =
     busy ||
     running ||
-    ["loading", "exporting", "packaging"].includes(state.status) ||
+    ["loading", "exporting", "packaging", "finalizing"].includes(state.status) ||
     state.saving;
   const loaded =
     state.model &&
@@ -303,6 +306,7 @@ function controls() {
     "imgsz",
     "mediaFile",
     "mediaSelect",
+    "saveFullVideo",
     "rtspUrl",
     "exportModel",
     "exportFile",
@@ -359,7 +363,9 @@ function render(stateIn) {
   const matchingModel =
     state.model?.id === $("modelSelect").value ? state.model : null;
   if (classModel?.id !== matchingModel?.id) renderModel();
-  $("stateLabel").textContent = statusNames[state.status] || state.status;
+  $("stateLabel").textContent = state.saving
+    ? "正在保存视频"
+    : statusNames[state.status] || state.status;
   $("stateDot").className = "state-dot " + state.status;
   $("statusMessage").textContent = state.message;
   $("actualDevice").textContent = state.model?.device || "—";
@@ -369,10 +375,16 @@ function render(stateIn) {
       : "—";
   $("latency").textContent = state.has_frame ? state.inference_ms : "—";
   $("count").textContent = state.has_frame ? state.count : "—";
-  $("recordingInfo").hidden = !state.recording;
-  $("recordingInfo").textContent = state.recording
-    ? `录制 ${Number(state.recording_fps || 25).toFixed(2)} FPS · ${state.recording_mode === "source_frames" ? "源视频逐帧保存，不跳帧" : "实时画面，流畅度取决于实际推理速度"}`
-    : "";
+  $("recordingInfo").hidden = !(state.recording || state.record_armed || state.saving || state.record_error);
+  $("recordingInfo").textContent = state.record_error
+    ? "录制保存失败：" + state.record_error
+    : state.saving
+      ? "正在编码保存，请等待完成；文件保留在本机 data/outputs。"
+      : state.record_armed
+        ? "已启用全程录制，等待第一帧推理结果…"
+        : state.recording
+          ? `录制 ${Number(state.recording_fps || 25).toFixed(2)} FPS · ${state.recording_mode === "source_frames" ? "源视频逐帧保存，不跳帧" : "实时画面，流畅度取决于实际推理速度"}`
+          : "";
   $("position").textContent = state.position
     ? `${state.position.seconds.toFixed(1)}s${state.position.duration ? " / " + state.position.duration.toFixed(1) + "s" : ""}`
     : "";
@@ -398,6 +410,10 @@ function render(stateIn) {
     showDownload(state.last_saved);
     refreshFiles().catch((e) => notify(e.message, true));
   }
+  if (state.recording_result) {
+    recordingSaved(state.recording_result, statusInitialized);
+  }
+  statusInitialized = true;
   if (state.record_error && state.record_error !== previous.record_error) {
     notify("视频保存失败：" + state.record_error, true);
   }
@@ -420,9 +436,31 @@ function downloadLink(item, label) {
 function showDownload(item) {
   $("latestDownload").hidden = false;
   $("latestDownload").replaceChildren(
-    document.createTextNode("已保存：" + item.name + "　"),
+    document.createTextNode("已保存到本机 data/outputs：" + item.name +
+      (item.output_type === "video" ? ` · ${Number(item.duration || 0).toFixed(2)} 秒 · ${Number(item.fps || 25).toFixed(2)} FPS　` : "　")),
     downloadLink(item, "下载文件"),
   );
+  if (item.output_type === "video") {
+    $("latestDownload").append(document.createTextNode("　若浏览器未自动下载，请点击下载文件。"));
+  }
+}
+function recordingSaved(item, autoDownload = true) {
+  if (handledRecordings.has(item.id)) return;
+  handledRecordings.add(item.id);
+  const key = "recording-download:" + item.id;
+  let alreadyHandled = false;
+  try {
+    alreadyHandled = localStorage.getItem(key) === "1";
+    localStorage.setItem(key, "1");
+  } catch (_) { /* In-memory deduplication also works when storage is unavailable. */ }
+  showDownload(item);
+  if (autoDownload && !alreadyHandled) {
+    const link = downloadLink(item);
+    document.body.append(link);
+    link.click();
+    link.remove();
+    notify("录制视频已保存；若未自动下载，可点击下方下载文件。");
+  }
 }
 function showExport(item) {
   const button = document.createElement("button");
@@ -449,7 +487,7 @@ function renderSaved() {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "empty-list";
-    empty.textContent = "还没有保存记录。推理后点击保存图片，或手动录制视频。";
+    empty.textContent = "还没有保存记录。可保存图片、手动录制片段，或勾选保存完整推理视频。";
     $("savedList").append(empty);
     return;
   }
@@ -511,7 +549,9 @@ document.querySelectorAll(".nav").forEach(
             "packaging",
             "loading",
             "exporting",
+            "finalizing",
           ].includes(state.status) ||
+          state.saving ||
           busy
         ) {
           const desired = state.source_kind === "batch" ? "batch" : kind;
@@ -535,6 +575,7 @@ document.querySelectorAll(".source").forEach(
         .querySelectorAll(".source")
         .forEach((b) => b.classList.toggle("active", b === e));
       $("fileSource").hidden = ["rtsp", "batch"].includes(kind);
+      $("fullVideoOption").hidden = kind !== "video";
       $("rtspSource").hidden = kind !== "rtsp";
       $("batchSource").hidden = kind !== "batch";
       $("batchResult").hidden = kind !== "batch";
@@ -633,13 +674,14 @@ $("start").onclick = () =>
       kind,
       media_id: $("mediaSelect").value || null,
       url: kind === "rtsp" ? $("rtspUrl").value : "",
+      save_full_video: kind === "video" && $("saveFullVideo").checked,
     });
     render(result);
   });
 $("stop").onclick = () =>
   action(async () => {
-    await api("stop");
-    notify("推理已停止");
+    render(await api("stop"));
+    if (!state.recording_result && !state.record_error) notify("推理已停止");
   });
 $("snapshot").onclick = () =>
   action(async () => {
@@ -654,15 +696,13 @@ $("record").onclick = () =>
     if (state.recording) {
       notify("正在编码保存视频…");
       const item = await api("record/stop");
-      showDownload(item);
-      downloadLink(item).click();
+      recordingSaved(item);
       await refreshFiles();
-      notify("标注视频已保存");
     } else {
       await api("record/start");
       notify(
         state.source_kind === "video"
-          ? "已开始逐帧录制，保存时保持源视频帧率；再次点击停止并保存"
+          ? "已开始逐帧录制；视频结束会自动保存，也可提前停止并保存"
           : "实时录制已开始，再次点击即可停止并保存",
       );
     }

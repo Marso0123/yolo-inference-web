@@ -173,3 +173,164 @@ def test_slow_inference_and_inflight_record_start_keep_all_source_frames(tmp_pat
     assert fps == 30
     assert ids == list(range(start_index, 16))  # Even the frames the earlier preview would skip.
     assert engine.status()['last_saved']['frames'] == 16 - start_index
+
+
+@pytest.fixture
+def short_video_engine(tmp_path, monkeypatch):
+    source = tmp_path / '一秒短视频.avi'
+    writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*'MJPG'), 25, (200, 120))
+    for index in range(25):
+        writer.write(frame_with_id(index))
+    writer.release()
+    module = importlib.import_module('yoloview.engine')
+    monkeypatch.setattr(module, 'assets', SimpleNamespace(get=lambda *a: {'path': str(source), 'media_type': 'video'}))
+
+    class Runner:
+        options = default_options()
+
+        def predict(self, frame):
+            time.sleep(.055)  # Slower than source FPS: full recording must never skip.
+            return frame, dict(count=1, counts={'object': 1}, inference_ms=55)
+
+    engine = Engine()
+    engine.runner, engine.loaded_id = Runner(), 'model'
+    return engine
+
+
+def start_full(engine, **changes):
+    return engine.start(dict(model_id='model', kind='video', media_id='clip',
+                             options=default_options(), save_full_video=True, **changes))
+
+
+@pytest.mark.parametrize('count', [1, 25])
+def test_full_video_records_first_through_last_without_second_click(short_video_engine, recording_output, count):
+    engine = short_video_engine
+    if count == 1:
+        # Replace the input with an extremely short one-frame video.
+        module = importlib.import_module('yoloview.engine')
+        source = module.assets.get('clip')['path']
+        writer = cv2.VideoWriter(source, cv2.VideoWriter_fourcc(*'MJPG'), 25, (200, 120))
+        writer.write(frame_with_id(0))
+        writer.release()
+    start_full(engine)
+    engine.thread.join(10)
+    state = engine.status()
+    assert state['status'] == 'finished' and not state['saving'] and not state['recording']
+    assert not state['record_armed'] and not state['record_error']
+    assert '已保存' in state['message']
+    fps, ids = read_video(recording_output)
+    assert fps == 25 and ids == list(range(count))
+    assert state['recording_result'] == state['last_saved']
+    assert state['last_saved']['duration'] == count / 25
+
+
+def test_default_preview_does_not_record(short_video_engine, recording_output):
+    engine = short_video_engine
+    engine.start(dict(model_id='model', kind='video', media_id='clip', options=default_options()))
+    engine.thread.join(10)
+    assert engine.status()['status'] == 'finished'
+    assert engine.status()['recording_result'] is None and not recording_output.exists()
+
+
+@pytest.mark.parametrize('first', ['eof', 'manual'])
+def test_eof_and_manual_stop_share_one_result(short_video_engine, recording_output, monkeypatch, first):
+    engine = short_video_engine
+    entered, release = threading.Event(), threading.Event()
+    original = Recorder.finish
+    calls = []
+
+    def finish(recorder):
+        calls.append(1)
+        entered.set()
+        assert release.wait(8)
+        return original(recorder)
+
+    monkeypatch.setattr(Recorder, 'finish', finish)
+    start_full(engine)
+    manual_results, manual_errors = [], []
+
+    def manual():
+        try:
+            manual_results.append(engine.finish_recording(True))
+        except Exception as error:
+            manual_errors.append(str(error))
+
+    if first == 'manual':
+        deadline = time.monotonic() + 4
+        while not engine.status()['recording'] and time.monotonic() < deadline:
+            time.sleep(.01)
+        worker = threading.Thread(target=manual)
+        worker.start()
+    assert entered.wait(6)
+    if first == 'eof':
+        assert engine.status()['status'] == 'finalizing'
+        with pytest.raises(ValueError):
+            engine.ensure_idle()
+        worker = threading.Thread(target=manual)
+        worker.start()
+    # Even when manual save detached the recorder, EOF must wait for it.
+    deadline = time.monotonic() + 4
+    while engine.status()['status'] != 'finalizing' and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert engine.status()['status'] == 'finalizing'
+    assert engine.status()['saving'] and not engine.status()['recording_result']
+    release.set()
+    worker.join(10)
+    engine.thread.join(10)
+    assert not worker.is_alive() and not engine.thread.is_alive()
+    assert not manual_errors and len(calls) == 1
+    assert manual_results == [engine.status()['recording_result']]
+    assert engine.finish_recording(True) == manual_results[0]  # Repeated stop is idempotent.
+    assert engine.status()['status'] == 'finished' and not engine.status()['saving']
+
+
+def test_stopping_full_video_saves_processed_prefix(short_video_engine, recording_output):
+    engine = short_video_engine
+    start_full(engine)
+    deadline = time.monotonic() + 4
+    while (engine.frame_index or 0) < 3 and time.monotonic() < deadline:
+        time.sleep(.01)
+    state = engine.stop()
+    fps, ids = read_video(recording_output)
+    assert state['status'] == 'stopped' and '已保存' in state['message']
+    assert fps == 25 and 1 <= len(ids) < 25 and ids == list(range(len(ids)))
+
+
+def test_encode_failure_stays_visible_and_keeps_avi(short_video_engine, recording_output, monkeypatch):
+    module = importlib.import_module('yoloview.recording')
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=1, stderr=b'test encoder failure'))
+    engine = short_video_engine
+    start_full(engine)
+    engine.thread.join(10)
+    state = engine.status()
+    assert '保存失败' in state['message'] and 'AVI' in state['record_error']
+    assert state['recording_result'] is None and not state['saving']
+    assert recording_output.with_suffix('.avi').exists()
+    with pytest.raises(ValueError, match='AVI'):
+        engine.finish_recording(True)
+
+
+def test_full_recording_rejected_for_rtsp(short_video_engine):
+    with pytest.raises(ValueError, match='仅支持本地视频'):
+        short_video_engine.start(dict(model_id='model', kind='rtsp', url='rtsp://localhost/test',
+                                     options=default_options(), save_full_video=True))
+
+
+def test_inference_error_preserved_when_partial_recording_is_saved(short_video_engine, recording_output):
+    engine = short_video_engine
+    predict = engine.runner.predict
+    calls = []
+
+    def fail(frame):
+        calls.append(1)
+        if len(calls) == 4:
+            raise ValueError('测试推理异常')
+        return predict(frame)
+
+    engine.runner.predict = fail
+    start_full(engine)
+    engine.thread.join(10)
+    state = engine.status()
+    assert state['status'] == 'error'
+    assert '测试推理异常' in state['message'] and '已保存' in state['message']
+    assert read_video(recording_output)[1] == [0, 1, 2]
