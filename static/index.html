@@ -284,6 +284,7 @@
                 <h2>保存你需要的结果</h2>
                 <p class="hint">按需保存当前标注画面，或手动录制一段视频。</p>
                 <div id="counts" class="count-chips"></div>
+                <p id="recordingInfo" class="hint" role="status" hidden></p>
               </div>
               <div class="save-actions">
                 <button id="snapshot" class="button secondary">
@@ -295,7 +296,8 @@
             </section>
             <div id="latestDownload" class="download-note" hidden></div>
             <p class="footnote">
-              视频按原始时间线播放，处理较慢时跳帧。录制保持实际时长，不包含音频。
+              本地视频录制时逐帧处理并保持源视频帧率，性能不足时预览会变慢。RTSP
+              录制受实际推理速度影响。视频不含音频。
             </p>
             <section id="batchResult" class="card" hidden>
               <div class="card-title">

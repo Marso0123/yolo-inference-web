@@ -369,6 +369,10 @@ function render(stateIn) {
       : "—";
   $("latency").textContent = state.has_frame ? state.inference_ms : "—";
   $("count").textContent = state.has_frame ? state.count : "—";
+  $("recordingInfo").hidden = !state.recording;
+  $("recordingInfo").textContent = state.recording
+    ? `录制 ${Number(state.recording_fps || 25).toFixed(2)} FPS · ${state.recording_mode === "source_frames" ? "源视频逐帧保存，不跳帧" : "实时画面，流畅度取决于实际推理速度"}`
+    : "";
   $("position").textContent = state.position
     ? `${state.position.seconds.toFixed(1)}s${state.position.duration ? " / " + state.position.duration.toFixed(1) + "s" : ""}`
     : "";
@@ -460,7 +464,7 @@ function renderSaved() {
       item.output_type === "dataset"
         ? "YOLO 数据集 · ZIP · 原图与标签"
         : item.output_type === "video"
-          ? "标注视频 · MP4 / H.264 · 无音频"
+          ? `标注视频 · MP4 / H.264 · 无音频${item.fps ? ` · ${Number(item.fps).toFixed(2)} FPS` : ""}`
           : "标注图片 · JPG";
     info.append(title, small);
     row.append(info, downloadLink(item, "下载文件 ↗"));
@@ -656,7 +660,11 @@ $("record").onclick = () =>
       notify("标注视频已保存");
     } else {
       await api("record/start");
-      notify("录制已开始，再次点击即可停止并保存");
+      notify(
+        state.source_kind === "video"
+          ? "已开始逐帧录制，保存时保持源视频帧率；再次点击停止并保存"
+          : "实时录制已开始，再次点击即可停止并保存",
+      );
     }
   });
 $("exportButton").onclick = () =>

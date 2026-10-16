@@ -20,6 +20,10 @@ Ultralytics/
 *.zip
 *.log
 *.pid
+*.key
+*.pem
+*.crt
+*.pfx
 *.pyc
 .idea/
 .vscode/

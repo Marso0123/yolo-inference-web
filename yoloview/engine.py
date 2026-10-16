@@ -33,6 +33,7 @@ class LiveSource:
         self.frame = None
         self.seq = 0
         self.epoch = 0
+        self.fps = 25.0
         self.thread = threading.Thread(target=self.read, daemon=True, name='rtsp-decoder')
         self.thread.start()
 
@@ -49,6 +50,8 @@ class LiveSource:
                                            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000])
                 if not capture.isOpened():
                     raise ValueError('连接失败')
+                fps = capture.get(cv2.CAP_PROP_FPS)
+                self.fps = float(fps) if np.isfinite(fps) and 0 < fps <= 240 else 25.0
                 while not self.stop.is_set():
                     ok, frame = capture.read()
                     if not ok:
@@ -89,9 +92,11 @@ class Engine:
         self.generation = 0
         self.jpeg = None
         self.frame = None
+        self.frame_index = None
         self.state = dict(status='idle', message='请选择模型', source_kind=None, model=None, recording=False,
                           saving=False, fps=0, inference_ms=0, count=0, counts={}, position=None,
-                          last_saved=None, export=None, record_error=None, batch=None)
+                          last_saved=None, export=None, record_error=None, batch=None,
+                          source_fps=None, recording_fps=None, recording_mode=None)
 
     def update(self, **kwargs):
         with self.lock:
@@ -105,8 +110,9 @@ class Engine:
         with self.lock:
             self.jpeg = None
             self.frame = None
+            self.frame_index = None
             self.seq += 1
-            self.state.update(count=0, counts={}, fps=0, inference_ms=0, position=None)
+            self.state.update(count=0, counts={}, fps=0, inference_ms=0, position=None, source_fps=None)
 
     def snapshot(self):
         with self.lock:
@@ -264,23 +270,35 @@ class Engine:
             job = batches.update(key, status=prior, message=str(error))
             self.update(status='finished' if self.stop_event.is_set() else 'error', batch=job, message=str(error))
 
-    def publish(self, frame, stats, position=None):
+    def publish(self, frame, stats, position=None, frame_index=None, recording=None):
         ok, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             raise ValueError('预览图像编码失败。')
         with self.lock:
             self.frame = frame
+            self.frame_index = frame_index
             self.jpeg = jpeg.tobytes()
             self.seq += 1
-            self.state.update(stats, position=position, status='running', message='正在推理')
-            if self.recorder:
-                self.recorder.write(frame)
+            recorder = self.recorder
+            if frame_index is not None and recorder is not recording:
+                recorder = None
+            message = '正在逐帧推理并录制，保存时保持源视频帧率' if self.recorder and not self.recorder.realtime else '正在推理'
+            self.state.update(stats, position=position, status='running', message=message)
+        # MJPEG compression / queue backpressure must not hold the preview/status lock.
+        if recorder:
+            try:
+                recorder.write(frame, source_index=frame_index)
+            except Exception as error:
+                LOGGER.exception('Recording write failed')
+                self.finish_recording(expected=recorder)
+                self.update(record_error=str(error), message='录制已停止：' + str(error))
 
     def run(self, kind, source):
         capture = None
         live = None
         started = time.monotonic()
         last_published = None
+        active_recording = None
         try:
             if kind == 'image':
                 frame = cv2.imdecode(np.fromfile(source, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -296,7 +314,8 @@ class Engine:
                 if not capture.isOpened():
                     raise ValueError('视频无法解码，请尝试 MP4（H.264）格式。')
                 fps = capture.get(cv2.CAP_PROP_FPS)
-                fps = fps if np.isfinite(fps) and 0 < fps < 1000 else 25
+                fps = fps if np.isfinite(fps) and 0 < fps <= 240 else 25
+                self.update(source_fps=fps)
                 count = capture.get(cv2.CAP_PROP_FRAME_COUNT)
                 duration = count / fps if np.isfinite(count) and count > 0 else None
                 next_index = 0
@@ -305,17 +324,34 @@ class Engine:
                 last_seq = -1
             while not self.stop_event.is_set():
                 position = None
+                frame_index = None
+                recording = None
                 if live:
                     frame, seq, epoch = live.snapshot()
                     if frame is None or seq == last_seq:
                         self.stop_event.wait(0.01)
                         continue
                     last_seq = seq
+                    self.update(source_fps=live.fps)
                 else:
+                    with self.lock:
+                        recording = self.recorder
+                    if recording is not active_recording:
+                        if recording:
+                            # Start from the last displayed frame, even if a newer preview
+                            # was already in flight when the user pressed Record.
+                            next_index = recording.source_index + 1
+                            if not capture.set(cv2.CAP_PROP_POS_FRAMES, next_index):
+                                raise ValueError('无法定位录制起点，请尝试 MP4（H.264）视频。')
+                            if abs(capture.get(cv2.CAP_PROP_POS_FRAMES) - next_index) > 0.5:
+                                raise ValueError('视频未能准确定位录制起点，已停止以避免跳帧。')
+                        active_recording = recording
+                        # Resume preview from the current source time after a slow recording.
+                        started = time.monotonic() - next_index / fps
                     elapsed = time.monotonic() - started
                     target = int(elapsed * fps)
-                    # Sequential grabs preserve codec behavior while discarding stale frames.
-                    while next_index < target and not self.stop_event.is_set():
+                    # Ordinary preview can skip stale frames; source recording cannot.
+                    while not recording and next_index < target and not self.stop_event.is_set():
                         if not capture.grab():
                             break
                         next_index += 1
@@ -326,10 +362,15 @@ class Engine:
                         self.update(status='finished', message='视频播放完成')
                         break
                     position = dict(seconds=round(next_index / fps, 2), duration=duration)
+                    frame_index = next_index
                     next_index += 1
                 result, stats = self.runner.predict(frame)
                 if self.stop_event.is_set():
                     break
+                if capture:
+                    with self.lock:
+                        if self.recorder is not None and self.recorder is not recording:
+                            continue
                 now = time.monotonic()
                 preview_fps = 0 if last_published is None else 1 / max(0.001, now - last_published)
                 last_published = now
@@ -340,7 +381,8 @@ class Engine:
                             continue
                         self.publish(result, dict(stats, fps=round(preview_fps, 1)), position)
                 else:
-                    self.publish(result, dict(stats, fps=round(preview_fps, 1)), position)
+                    self.publish(result, dict(stats, fps=round(preview_fps, 1)), position,
+                                 frame_index=frame_index, recording=recording)
                 if capture:
                     self.stop_event.wait(max(0, next_index / fps - (time.monotonic() - started)))
         except Exception as error:
@@ -391,18 +433,26 @@ class Engine:
                 raise ValueError('请等待第一帧推理结果。')
             if self.recorder or self.record_saving:
                 raise ValueError('已有录制或保存任务。')
-            self.recorder = Recorder(self.frame)
-            self.state.update(recording=True, record_error=None, message='正在推理并录制')
+            realtime = self.state['source_kind'] == 'rtsp'
+            if not realtime and self.frame_index is None:
+                raise ValueError('请等待视频帧就绪。')
+            fps = self.state['source_fps'] or 25
+            self.recorder = Recorder(self.frame, fps=fps, realtime=realtime, source_index=self.frame_index)
+            self.state.update(recording=True, record_error=None, recording_fps=fps,
+                              recording_mode='realtime' if realtime else 'source_frames',
+                              message='正在录制实时推理画面' if realtime else '正在逐帧录制，保存时保持源视频帧率')
             return self.status()
 
-    def finish_recording(self, strict=False):
+    def finish_recording(self, strict=False, expected=None):
         with self.lock:
             recorder = self.recorder
+            if expected is not None and recorder is not expected:
+                return None
             if recorder is None:
                 return None
             self.recorder = None
             self.record_saving = True
-            self.state.update(recording=False, saving=True)
+            self.state.update(recording=False, saving=True, recording_fps=None, recording_mode=None)
         try:
             item = recorder.finish()
             self.update(last_saved=item)
